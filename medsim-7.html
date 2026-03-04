@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MedSim Monitor</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#000;color:#fff;font-family:'Courier New',monospace;overflow:hidden;width:100%;height:100vh;display:flex;flex-direction:column}
+#setup{position:fixed;inset:0;background:#080808;z-index:500;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:32px}
+#setup h1{font-size:20px;font-weight:800;color:#fff;font-family:-apple-system,sans-serif;letter-spacing:2px}
+#setup p{font-size:13px;color:#666;text-align:center;max-width:320px;line-height:1.9;font-family:-apple-system,sans-serif}
+#setup-input{background:#111;border:2px solid #00e676;border-radius:10px;color:#00ff44;font-size:26px;font-weight:800;letter-spacing:5px;text-align:center;padding:12px 20px;width:100%;max-width:340px;outline:none;text-transform:uppercase;font-family:'Courier New',monospace}
+#setup-btn{background:#00e676;color:#000;border:none;border-radius:10px;padding:14px 0;font-size:16px;font-weight:800;cursor:pointer;width:100%;max-width:340px;font-family:-apple-system,sans-serif}
+#setup-msg{font-size:12px;color:#888;font-family:-apple-system,sans-serif;min-height:20px;text-align:center}
+#topbar{display:flex;justify-content:space-between;align-items:center;padding:3px 14px;background:#080808;border-bottom:1px solid #1c1c1c;height:26px;flex-shrink:0}
+#topbar span{font-size:11px;color:#555;letter-spacing:1px}
+#clock{color:#999!important;font-size:13px!important}
+#room-disp{color:#00ff44!important;letter-spacing:3px;font-weight:bold}
+#conn{font-size:11px}#conn.live{color:#00e676}#conn.off{color:#ff4444}#conn.try{color:#ffd740}
+#main{flex:1;display:flex;min-height:0}
+#waves{flex:1;display:flex;flex-direction:column;min-width:0;border-right:2px solid #111}
+.wave-row{flex:1;position:relative;border-bottom:1px solid #111;min-height:0;overflow:hidden}
+.wave-row:last-child{border-bottom:none}
+canvas{display:block;position:absolute;top:0;left:0;width:100%;height:100%}
+.wlabel{position:absolute;top:5px;left:10px;font-size:11px;font-weight:bold;letter-spacing:1.5px;pointer-events:none;text-shadow:0 0 6px currentColor;z-index:2}
+.wrinfo{position:absolute;top:5px;right:10px;font-size:11px;opacity:.6;pointer-events:none;z-index:2}
+#rhythm-tag{position:absolute;bottom:6px;left:10px;font-size:12px;font-weight:bold;letter-spacing:3px;color:#00ff44;text-shadow:0 0 8px #00ff44;pointer-events:none;z-index:2}
+#ecg-row .wlabel{color:#00ff44}#spo2-row .wlabel{color:#00cfff}#co2-row .wlabel{color:#ffd740}#art-row .wlabel{color:#ff6644}
+#nums{width:210px;flex-shrink:0;display:flex;flex-direction:column;background:#040404}
+.vbox{flex:1;border-bottom:1px solid #151515;display:flex;flex-direction:column;justify-content:center;padding:5px 10px 5px 12px;position:relative;overflow:hidden}
+.vbox:last-child{border-bottom:none}
+.vlabel{font-size:10px;font-weight:bold;letter-spacing:2px;opacity:.55;margin-bottom:1px}
+.vnum{font-size:44px;font-weight:bold;line-height:1;font-variant-numeric:tabular-nums;text-shadow:0 0 12px currentColor;letter-spacing:-1px}
+.vsub{font-size:11px;opacity:.55;margin-top:2px}
+.vunit{font-size:11px;opacity:.4;position:absolute;right:8px;bottom:7px}
+.hr-col{color:#00ff44}.bp-col{color:#ff4444}.sp-col{color:#00cfff}.rr-col{color:#aaffaa}.co2-col{color:#ffd740}.tmp-col{color:#ff9100}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
+.alarm .vnum,.alarm .vlabel{animation:blink .65s infinite}
+#arrest-ring{display:none;position:fixed;inset:0;pointer-events:none;z-index:4}
+@keyframes ring{0%,100%{box-shadow:inset 0 0 0 6px rgba(255,0,0,0)}50%{box-shadow:inset 0 0 0 6px rgba(255,30,30,.9)}}
+#arrest-ring.show{display:block;animation:ring .7s infinite}
+#audio-prompt{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.75);z-index:99;cursor:pointer}
+#audio-prompt div{background:#111;border:1px solid #333;padding:18px 32px;border-radius:12px;font-size:15px;color:#aaa;text-align:center;line-height:2}
+</style>
+</head>
+<body>
+<div id="setup">
+  <div style="font-size:44px">🖥️</div>
+  <h1>MedSim Monitor</h1>
+  <p>Choose a <strong style="color:#fff">Room Code</strong>.<br>Enter this same code on the phone controller to connect.</p>
+  <input id="setup-input" type="text" value="ROOM1" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">
+  <button id="setup-btn" onclick="startMonitor()">START MONITOR</button>
+  <div id="setup-msg">Both devices need internet access.</div>
+</div>
+<div id="arrest-ring"></div>
+<div id="audio-prompt" onclick="enableAudio()" style="display:none">
+  <div>🔊 Tap to enable<br><strong style="color:#fff">pulse oximeter beeps</strong></div>
+</div>
+<div id="topbar">
+  <span>MedSim &nbsp;|&nbsp; Room: <strong id="room-disp">----</strong></span>
+  <span id="clock">--:--:--</span>
+  <span id="conn" class="off">● WAITING</span>
+</div>
+<div id="main">
+  <div id="waves">
+    <div class="wave-row" id="ecg-row">
+      <div class="wlabel">I &nbsp;ECG</div><div class="wrinfo" id="ecg-info">72 bpm</div>
+      <div id="rhythm-tag">NSR</div><canvas id="c-ecg"></canvas>
+    </div>
+    <div class="wave-row" id="spo2-row">
+      <div class="wlabel">SpO2 PLETH</div><div class="wrinfo" id="spo2-info">98%</div>
+      <canvas id="c-spo2"></canvas>
+    </div>
+    <div class="wave-row" id="co2-row">
+      <div class="wlabel" id="co2-label">CAPNOGRAPHY</div><div class="wrinfo" id="co2-info">35 mmHg</div>
+      <canvas id="c-co2"></canvas>
+    </div>
+    <div class="wave-row" id="art-row" style="display:none">
+      <div class="wlabel">ART LINE</div><div class="wrinfo" id="art-info">120/80</div>
+      <!-- Dynamic pressure grid lines — positioned by JS -->
+      <div id="art-line-sbp" style="position:absolute;left:0;right:0;height:0;border-top:1px dashed rgba(255,102,68,.45);pointer-events:none;z-index:3"></div>
+      <div id="art-line-map" style="position:absolute;left:0;right:0;height:0;border-top:1px dashed rgba(255,102,68,.22);pointer-events:none;z-index:3"></div>
+      <div id="art-line-dbp" style="position:absolute;left:0;right:0;height:0;border-top:1px dashed rgba(255,102,68,.45);pointer-events:none;z-index:3"></div>
+      <!-- SBP / DBP labels on grid lines -->
+      <div id="art-lbl-sbp" style="position:absolute;right:8px;font-size:8px;color:rgba(255,102,68,.6);pointer-events:none;z-index:4;transform:translateY(-9px)"></div>
+      <div id="art-lbl-dbp" style="position:absolute;right:8px;font-size:8px;color:rgba(255,102,68,.6);pointer-events:none;z-index:4;transform:translateY(-9px)"></div>
+      <canvas id="c-art"></canvas>
+    </div>
+  </div>
+  <div id="nums">
+    <div class="vbox hr-col"  id="b-hr"><div class="vlabel">HR</div><div class="vnum" id="n-hr">72</div><div class="vsub" id="n-rhy">NSR</div><div class="vunit">bpm</div></div>
+    <div class="vbox bp-col"  id="b-bp"><div class="vlabel" id="bp-label">NIBP</div><div class="vnum" id="n-bp">120/80</div><div class="vsub" id="n-map">MAP 93</div><div class="vunit">mmHg</div></div>
+    <div class="vbox sp-col"  id="b-sp"><div class="vlabel">SpO2</div><div class="vnum" id="n-sp">98</div><div class="vunit">%</div></div>
+    <div class="vbox rr-col"  id="b-rr"><div class="vlabel">RESP</div><div class="vnum" id="n-rr">14</div><div class="vunit">br/min</div></div>
+    <div class="vbox co2-col" id="b-co2"><div class="vlabel">EtCO2</div><div class="vnum" id="n-co2">35</div><div class="vunit">mmHg</div></div>
+    <div class="vbox tmp-col" id="b-tmp"><div class="vlabel">TEMP</div><div class="vnum" id="n-tmp">37.0</div><div class="vunit">°C</div></div>
+  </div>
+</div>
+<script>
+'use strict';
+var S={hr:72,sbp:120,dbp:80,spo2:98,rr:14,etco2:35,temp:98.6,rhythm:'NSR',artLine:false,etco2On:true,
+  ventMode:'VCV',tv:450,rr_set:14,peep:5,ps:10,fio2:50,ie:2.0,pipLimit:40,apl:30,
+  compliance:50,resistance:5,ventPath:'normal',flowRate:40,riseTime:25,triggerSens:-2};
+var ROOM='',peer=null,clients=[];
+var connEl=document.getElementById('conn');
+setInterval(function(){document.getElementById('clock').textContent=new Date().toLocaleTimeString('en-US',{hour12:false});},1000);
+document.getElementById('setup-input').addEventListener('keydown',function(e){if(e.key==='Enter')startMonitor();});
+
+function startMonitor(){
+  var v=document.getElementById('setup-input').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(!v){alert('Enter a room code');return;}
+  ROOM=v;
+  document.getElementById('setup-btn').disabled=true;
+  document.getElementById('setup-msg').textContent='Registering room...';
+  document.getElementById('setup-msg').style.color='#ffd740';
+  document.getElementById('room-disp').textContent=ROOM;
+  peer=new Peer('medsim-mon-'+ROOM,{debug:0});
+  peer.on('open',function(){
+    document.getElementById('setup').style.display='none';
+    document.getElementById('audio-prompt').style.display='flex';
+    connEl.textContent='● WAITING FOR CLIENTS';connEl.className='try';
+    setTimeout(resizeAll,100);
+    requestAnimationFrame(frame);
+  });
+  peer.on('error',function(err){
+    if(err.type==='unavailable-id'){
+      document.getElementById('setup-msg').textContent='Room code in use. Try another.';
+      document.getElementById('setup-msg').style.color='#ff4444';
+      document.getElementById('setup-btn').disabled=false;
+    } else {
+      document.getElementById('setup-msg').textContent='Error: '+err.message;
+      setTimeout(function(){document.getElementById('setup-btn').disabled=false;},2000);
+    }
+  });
+  peer.on('connection',function(c){
+    clients.push(c);
+    c.on('open',function(){connEl.textContent='● '+clients.filter(x=>x.open).length+' CLIENT(S) CONNECTED';connEl.className='live';sendState();});
+    c.on('data',function(msg){handleMessage(msg);});
+    c.on('close',function(){clients=clients.filter(x=>x!==c);var n=clients.filter(x=>x.open).length;connEl.textContent=n?'● '+n+' CLIENT(S) CONNECTED':'● WAITING FOR CLIENTS';connEl.className=n?'live':'try';});
+    c.on('error',function(){clients=clients.filter(x=>x!==c);connEl.textContent='● CONNECTION ERROR';connEl.className='off';});
+  });
+}
+
+function sendState(){
+  clients.forEach(function(c){if(c&&c.open){try{c.send({type:'state',data:S});}catch(e){}}});
+}
+
+function handleMessage(msg){
+  if(!msg||!msg.type)return;
+  if(msg.type==='toggle'){
+    S[msg.key]=!S[msg.key];
+    if(msg.key==='artLine'){
+      var row=document.getElementById('art-row');
+      row.style.display=S.artLine?'':'none';
+      if(S.artLine){setTimeout(function(){rsz(cA,xA);lA=-1;updateArtLines();},60);}
+      else{lA=-1;}
+      document.getElementById('bp-label').textContent=S.artLine?'ART':'NIBP';
+    }
+    clamp();refreshNums();checkAlarms();sendState();
+    return;
+  }
+  if(msg.type==='update'){S=Object.assign({},S,msg.data);}
+  else if(msg.type==='scenario'){applyScenario(msg.name);return;}
+  else if(msg.type==='intervention'){applyIntervention(msg.drug,parseFloat(msg.dose));return;}
+  else if(msg.type==='ventPath'){applyVentPath(msg.path);return;}
+  clamp();refreshNums();checkAlarms();sendState();
+}
+
+function clamp(){
+  S.hr=Math.max(0,Math.min(300,S.hr));S.sbp=Math.max(0,Math.min(280,S.sbp));
+  S.dbp=Math.max(0,Math.min(180,S.dbp));S.spo2=Math.max(0,Math.min(100,S.spo2));
+  S.rr=Math.max(0,Math.min(60,S.rr));S.etco2=Math.max(0,Math.min(80,S.etco2));
+  S.temp=Math.max(90,Math.min(108,S.temp));
+}
+
+function refreshNums(){
+  // noCircHR: rhythms with no ECG rate (VFib, Asystole only — PEA still shows rate)
+  var noCircHR=(S.rhythm==='VFib'||S.rhythm==='Asystole');
+  // noCirc: no mechanical/perfusing circulation (includes PEA)
+  var noCirc=noCircHR||(S.rhythm==='PEA');
+  // noPerf: no perfusion (also if BP=0 e.g. pulseless VTach)
+  var noPerf=noCirc||(S.sbp<30);
+  var map=Math.round((S.sbp+2*S.dbp)/3);
+  var tC=((+S.temp-32)*5/9).toFixed(1);
+  document.getElementById('n-hr').textContent=noCircHR?'---':S.hr;
+  document.getElementById('n-rhy').textContent=S.rhythm;
+  document.getElementById('rhythm-tag').textContent=S.rhythm;
+  document.getElementById('ecg-info').textContent=noCircHR?'--- bpm':S.hr+' bpm';
+  // BP: no display if noCirc or if BP=0 (pulseless VTach)
+  var bpStr=(noCirc||S.sbp===0)?'---/---':S.sbp+'/'+S.dbp;
+  document.getElementById('n-bp').textContent=bpStr;
+  document.getElementById('n-map').textContent=(noCirc||S.sbp===0)?'MAP ---':'MAP '+map;
+  document.getElementById('art-info').textContent=(noCirc||S.sbp===0)?'---/---':S.sbp+'/'+S.dbp;
+  document.getElementById('n-sp').textContent=noPerf?'---':S.spo2;
+  document.getElementById('spo2-info').textContent=noPerf?'---%':S.spo2+'%';
+  document.getElementById('n-rr').textContent=S.rr;
+  // EtCO2 display
+  var co2Disp=!S.etco2On?'---':(S.rr===0?'0':S.etco2);
+  document.getElementById('n-co2').textContent=co2Disp;
+  document.getElementById('co2-info').textContent=!S.etco2On?'OFF':(S.rr===0?'0 mmHg':S.etco2+' mmHg');
+  document.getElementById('co2-label').textContent=S.etco2On?'CAPNOGRAPHY':'CAPNOGRAPHY (OFF)';
+  document.getElementById('n-tmp').textContent=tC;
+  document.getElementById('bp-label').textContent=S.artLine?'ART':'NIBP';
+}
+
+function checkAlarms(){
+  var noCircHR=(S.rhythm==='VFib'||S.rhythm==='Asystole');
+  var noCirc=noCircHR||(S.rhythm==='PEA');
+  var noPerf=noCirc||(S.sbp<30);
+  document.getElementById('arrest-ring').className=(noCirc||noPerf)?'show':'';
+  sa('b-hr',S.hr<40||S.hr>150||noCircHR);
+  sa('b-bp',(!noCirc&&S.sbp<80)||S.sbp>200);
+  sa('b-sp',S.spo2<90&&!noPerf);
+  sa('b-rr',S.rr>0&&(S.rr<8||S.rr>30));
+}
+function sa(id,on){document.getElementById(id).classList.toggle('alarm',on);}
+
+// ── AUDIO ─────────────────────────────────────────────────────────────────────
+var actx=null,aready=false;
+function enableAudio(){document.getElementById('audio-prompt').style.display='none';try{actx=new(window.AudioContext||window.webkitAudioContext)();aready=true;}catch(e){}}
+function beep(){
+  var noCircHR=(S.rhythm==='VFib'||S.rhythm==='Asystole');
+  if(!aready||!actx||noCircHR||!S.hr||S.sbp<30)return;
+  var f=220+((Math.max(70,Math.min(100,S.spo2))-70)/30)*660,now=actx.currentTime;
+  var o=actx.createOscillator(),g=actx.createGain();
+  o.type='sine';o.frequency.value=f;
+  g.gain.setValueAtTime(0,now);g.gain.linearRampToValueAtTime(.22,now+.006);
+  g.gain.setValueAtTime(.22,now+.06);g.gain.linearRampToValueAtTime(0,now+.115);
+  o.connect(g);g.connect(actx.destination);o.start(now);o.stop(now+.13);
+}
+
+// ── CANVAS ────────────────────────────────────────────────────────────────────
+var cE=document.getElementById('c-ecg'),cS=document.getElementById('c-spo2'),
+    cC=document.getElementById('c-co2'),cA=document.getElementById('c-art');
+var xE=cE.getContext('2d'),xS=cS.getContext('2d'),xC=cC.getContext('2d'),xA=cA.getContext('2d');
+var lE=-1,lP=-1,lC=-1,lA=-1;
+
+function rsz(c,x){
+  var r=c.parentElement.getBoundingClientRect(),w=Math.round(r.width),h=Math.round(r.height);
+  if(w>0&&h>0&&(c.width!==w||c.height!==h)){c.width=w;c.height=h;x.fillStyle='#000';x.fillRect(0,0,w,h);}
+}
+function resizeAll(){rsz(cE,xE);rsz(cS,xS);rsz(cC,xC);if(S.artLine)rsz(cA,xA);lE=lP=lC=lA=-1;}
+window.addEventListener('resize',resizeAll);
+
+function gauss(x,m,s){return Math.exp(-.5*Math.pow((x-m)/s,2));}
+
+function ecgV(p,r){
+  if(r==='NSR'||r==='Brady'||r==='PEA'||r==='Paced'){
+    var v=.18*gauss(p,.10,.024)-.09*gauss(p,.376,.009)+gauss(p,.400,.016)-.18*gauss(p,.428,.010)+.03*gauss(p,.50,.04)+.28*gauss(p,.65,.056);
+    if(r==='Paced')v+=.65*gauss(p,.365,.004);return v;
+  }
+  if(r==='SVT')return .95*gauss(p,.400,.014)-.15*gauss(p,.430,.009)+.20*gauss(p,.60,.040)-.07*gauss(p,.53,.018);
+  if(r==='AFib')return .92*gauss(p,.400,.015)-.14*gauss(p,.430,.009)+.22*gauss(p,.64,.048)+.04*Math.sin(p*Math.PI*26+1.3)+.03*Math.sin(p*Math.PI*33+.7);
+  if(r==='VTach')return .75*gauss(p,.22,.06)-.35*gauss(p,.37,.055)+.50*gauss(p,.52,.065)-.20*gauss(p,.65,.03)+.10*gauss(p,.78,.04);
+  if(r==='VFib')return .45*Math.sin(p*Math.PI*6.7+.4)+.30*Math.sin(p*Math.PI*11.2+1.1)+.20*Math.sin(p*Math.PI*17.5+2.3)+.10*(Math.random()-.5);
+  return(Math.random()-.5)*.015;
+}
+
+// SpO2 pleth — fully continuous segments, no discontinuities
+// Segments verified: each endpoint matches the next segment's start value exactly
+function plV(p){
+  // Upstroke: 0→1.0  over [0.00, 0.13]  (half-cosine, wider than before)
+  if(p<0.13){var t=p/0.13;return 0.5*(1-Math.cos(t*Math.PI));}
+  // Rounded dome: 1.0→0.80 over [0.13, 0.32]  (gentle parabola)
+  if(p<0.32){var t=(p-0.13)/0.19;return 1.0-0.20*t*t;}
+  // Concave descent to notch level: 0.80→0.26 over [0.32, 0.55]
+  if(p<0.55){var t=(p-0.32)/0.23;return 0.80-0.54*Math.pow(t,0.55);}
+  // Dicrotic notch bump: 0.26 up to ~0.36 and back to 0.26 over [0.55, 0.67]
+  if(p<0.67){var t=(p-0.55)/0.12;return 0.26+0.10*Math.sin(t*Math.PI);}
+  // Diastolic runoff: 0.26→0 over [0.67, 0.92]
+  if(p<0.92){var t=(p-0.67)/0.25;return 0.26*Math.pow(1-t,1.6);}
+  return 0;
+}
+
+// Arterial line — returns normalized 0-1 shape; actual mmHg mapped in render loop
+function artV(p){
+  if(p<0.10){var t=p/0.10;return t*t*(3-2*t);}           // very sharp upstroke
+  if(p<0.30){var t=(p-0.10)/0.20;return 1.0-0.72*Math.pow(t,0.50);} // concave descent
+  if(p<0.44){var t=(p-0.30)/0.14;return 0.28+0.11*Math.sin(t*Math.PI);} // dicrotic notch
+  if(p<0.88){var t=(p-0.44)/0.44;return 0.28*Math.pow(1-t,1.3);}   // diastolic runoff to ~DBP
+  return 0.03;
+}
+// Map art value (0-1) to actual mmHg pressure
+function artPressure(v){
+  var sbp=S.sbp||120,dbp=S.dbp||80;
+  // v=1 → SBP, v≈0.03 → DBP, dicrotic notch ≈ 0.35 → midway
+  return dbp+(sbp-dbp)*v;
+}
+// Y pixel from mmHg pressure for art canvas
+// Scale: show range [artLo, artHi] where lo=DBP-20, hi=SBP+40
+function artToY(mmhg,H){
+  var sbp=S.sbp||120,dbp=S.dbp||80;
+  var lo=Math.max(0,dbp-25),hi=sbp+45;
+  var frac=(mmhg-lo)/(hi-lo);
+  return Math.max(2,Math.min(H-2,Math.round(H*0.93-frac*H*0.88)));
+}
+// Update CSS pressure grid lines on art row
+function updateArtLines(){
+  if(!S.artLine)return;
+  var sbp=S.sbp||120,dbp=S.dbp||80,map=Math.round((sbp+2*dbp)/3);
+  var H=cA.parentElement.getBoundingClientRect().height;
+  if(!H)return;
+  var lo=Math.max(0,dbp-25),hi=sbp+45;
+  function pct(v){return(1-(v-lo)/(hi-lo))*100;}
+  var sbpP=pct(sbp),mapP=pct(map),dbpP=pct(dbp);
+  document.getElementById('art-line-sbp').style.top=sbpP.toFixed(1)+'%';
+  document.getElementById('art-line-map').style.top=mapP.toFixed(1)+'%';
+  document.getElementById('art-line-dbp').style.top=dbpP.toFixed(1)+'%';
+  document.getElementById('art-lbl-sbp').style.top=sbpP.toFixed(1)+'%';
+  document.getElementById('art-lbl-sbp').textContent=sbp;
+  document.getElementById('art-lbl-dbp').style.top=dbpP.toFixed(1)+'%';
+  document.getElementById('art-lbl-dbp').textContent=dbp;
+}
+
+function co2V(p,e){
+  if(!e||p<.07)return 0;var n=e/40;
+  var shark=(S.ventPath==='bronchospasm'||S.ventPath==='mucus_plug');
+  var lowCO2=(S.ventPath==='air_embolism');
+  if(p<.20){var t=(p-.07)/.13;t=t*t*(3-2*t);return n*t*(lowCO2?.25:1);}
+  if(p<.60){
+    if(shark){var slope=(p-.20)/.40;return n*(slope*1.3+.05);}
+    return (lowCO2?n*.25:n)*(1+.06*(p-.20)/.40);
+  }
+  if(p<.72){var t2=(p-.60)/.12;t2=t2*t2*(3-2*t2);return (shark?n*1.35:lowCO2?n*.25:n*1.06)*(1-t2);}
+  return 0;
+}
+
+function sd(cv,cx,col,nY,pY){
+  var W=cv.width,H=cv.height;if(W<2||H<2)return;
+  cx.drawImage(cv,-1,0);cx.fillStyle='#000';cx.fillRect(W-2,0,2,H);
+  cx.strokeStyle=col;cx.lineWidth=2;cx.lineCap='round';cx.shadowColor=col;cx.shadowBlur=8;
+  cx.beginPath();cx.moveTo(W-2,pY<0?nY:pY);cx.lineTo(W-1,nY);cx.stroke();cx.shadowBlur=0;
+}
+function toY(v,H,cf,af){return Math.round(H*cf-v*H*af);}
+
+var lt=null,ep=0,cp=0,bf=false,PPS=120;  // PPS reduced for slightly slower waveforms
+function frame(ts){
+  requestAnimationFrame(frame);
+  if(lt===null){lt=ts;return;}
+  var dt=Math.min((ts-lt)/1000,.05);lt=ts;
+  var np=Math.max(1,Math.round(PPS*dt));
+  var HE=cE.height,WE=cE.width,HS=cS.height,HC=cC.height,HA=cA.height;
+  if(!WE)return;
+  var rh=S.rhythm;
+  var hr=(rh==='VFib')?350:Math.max(1,S.hr||1);
+  var rr=Math.max(1,S.rr||1);
+  var bs=60/hr,brs=60/rr,spx=dt/np;
+  var noCircHR=(rh==='VFib'||rh==='Asystole');
+  var noCirc=noCircHR||(rh==='PEA');
+  var noPerf=noCirc||(S.sbp<30);
+
+  for(var i=0;i<np;i++){
+    ep+=spx/bs;cp+=spx/brs;
+    if(ep>=1){ep-=1;bf=false;if(rh==='AFib'){ep+=(Math.random()-.5)*.15;if(ep<0)ep=0;}}
+    if(cp>=1)cp-=1;
+    var pp=(ep+.78)%1;
+    if(!bf&&ep>.38&&ep<.44&&!noCircHR){bf=true;beep();}
+
+    // ECG
+    var yE=Math.max(2,Math.min(HE-2,toY(ecgV(ep,rh),HE,.62,.36)));
+    sd(cE,xE,'#00ff44',yE,lE);lE=yE;
+
+    // SpO2 pleth — flat if no perfusion (noPerf covers PEA, pulseless VTach, VFib, Asystole)
+    var rs=0;
+    if(!noPerf){rs=plV(pp);rs*=.40+(Math.max(50,Math.min(100,S.spo2))-50)/50*.60;}
+    var yS=Math.max(2,Math.min(HS-2,toY(rs,HS,.80,.65)));
+    sd(cS,xS,'#00cfff',yS,lP);lP=yS;
+
+    // CO2 — flat if no breathing, or etco2On is false, or no circulation
+    var rc=0;
+    if(S.etco2On&&S.rr>0&&!noCirc){rc=co2V(cp,S.etco2);}
+    var yC=Math.max(2,Math.min(HC-2,toY(rc,HC,.90,.80)));
+    sd(cC,xC,'#ffd740',yC,lC);lC=yC;
+
+    // Arterial line — pressure-accurate: peak=SBP, trough≈DBP
+    if(S.artLine&&cA.width>0){
+      var rawA=noPerf?artToY(S.dbp||80,HA):artToY(artPressure(artV(ep)),HA);
+      var yA=rawA;
+      sd(cA,xA,'#ff6644',yA,lA);lA=yA;
+    }
+  }
+}
+
+// ── SCENARIOS ─────────────────────────────────────────────────────────────────
+var SCENARIOS={
+  normal:             {hr:72, sbp:120,dbp:80, spo2:98, rr:14,etco2:35,temp:98.6,rhythm:'NSR',   etco2On:true},
+  cardiac_arrest_vfib:{hr:0,  sbp:0,  dbp:0,  spo2:60, rr:0, etco2:0, temp:98.6,rhythm:'VFib',  etco2On:true},
+  cardiac_arrest_pea: {hr:65, sbp:0,  dbp:0,  spo2:55, rr:0, etco2:0, temp:98.6,rhythm:'PEA',   etco2On:true},
+  asystole:           {hr:0,  sbp:0,  dbp:0,  spo2:50, rr:0, etco2:0, temp:98.6,rhythm:'Asystole',etco2On:true},
+  vtach_unstable:     {hr:155,sbp:72, dbp:42, spo2:91, rr:22,etco2:26,temp:98.6,rhythm:'VTach',  etco2On:true},
+  vtach_pulseless:    {hr:175,sbp:0,  dbp:0,  spo2:60, rr:0, etco2:0, temp:98.6,rhythm:'VTach',  etco2On:true},
+  svt:                {hr:220,sbp:92, dbp:58, spo2:95, rr:20,etco2:31,temp:98.6,rhythm:'SVT',    etco2On:true},
+  afib:               {hr:112,sbp:108,dbp:66, spo2:96, rr:16,etco2:33,temp:98.6,rhythm:'AFib',   etco2On:true},
+  afib_rvr:           {hr:148,sbp:95, dbp:60, spo2:94, rr:20,etco2:29,temp:98.6,rhythm:'AFib',   etco2On:true},
+  bradycardia:        {hr:36, sbp:78, dbp:48, spo2:89, rr:12,etco2:38,temp:98.6,rhythm:'Brady',  etco2On:true},
+  hypovolemic_shock:  {hr:128,sbp:78, dbp:48, spo2:93, rr:26,etco2:22,temp:97.2,rhythm:'NSR',    etco2On:true},
+  septic_shock:       {hr:118,sbp:84, dbp:50, spo2:92, rr:24,etco2:28,temp:102.8,rhythm:'NSR',   etco2On:true},
+  anaphylaxis:        {hr:135,sbp:68, dbp:38, spo2:86, rr:30,etco2:18,temp:98.8,rhythm:'NSR',    etco2On:true},
+  pulm_embolism:      {hr:118,sbp:92, dbp:62, spo2:85, rr:28,etco2:24,temp:99.0, rhythm:'NSR',   etco2On:true},
+  tension_ptx:        {hr:130,sbp:74, dbp:44, spo2:82, rr:32,etco2:16,temp:98.6,rhythm:'NSR',    etco2On:true},
+  hypertensive_crisis:{hr:92, sbp:225,dbp:138,spo2:96, rr:18,etco2:36,temp:98.6,rhythm:'NSR',    etco2On:true},
+  rosc:               {hr:58, sbp:88, dbp:56, spo2:84, rr:12,etco2:35,temp:97.0,rhythm:'NSR',    etco2On:true}
+};
+
+function applyScenario(name){
+  if(SCENARIOS[name]){
+    S=Object.assign({},S,SCENARIOS[name]);  // merges; preserves artLine, overrides others
+    clamp();refreshNums();checkAlarms();sendState();
+  }
+}
+
+// ── VENT PATHOLOGY ────────────────────────────────────────────────────────────
+function applyVentPath(path){
+  var p={ventPath:path};
+  switch(path){
+    case 'normal':       Object.assign(p,{compliance:50,resistance:5});
+      S.spo2=Math.min(S.spo2+6,98);S.rr=Math.max(S.rr-4,14);break;
+    case 'bronchospasm': Object.assign(p,{compliance:44,resistance:28});
+      S.spo2=Math.max(S.spo2-10,82);S.hr=Math.min(S.hr+18,160);S.rr=Math.min(S.rr+6,30);break;
+    case 'ards':         Object.assign(p,{compliance:14,resistance:8});
+      S.spo2=Math.max(S.spo2-14,74);S.hr=Math.min(S.hr+15,155);S.rr=Math.min(S.rr+8,34);break;
+    case 'mainstem':     Object.assign(p,{compliance:28,resistance:12});
+      S.spo2=Math.max(S.spo2-16,76);S.hr=Math.min(S.hr+12,150);break;
+    case 'mucus_plug':   Object.assign(p,{compliance:38,resistance:22});
+      S.spo2=Math.max(S.spo2-8,84);S.hr=Math.min(S.hr+10,145);break;
+    case 'air_embolism': Object.assign(p,{compliance:50,resistance:5});
+      S.etco2=Math.max(S.etco2-18,8);S.hr=Math.min(S.hr+25,165);S.sbp=Math.max(S.sbp-20,55);break;
+    case 'pneumothorax': Object.assign(p,{compliance:18,resistance:8});
+      S.spo2=Math.max(S.spo2-14,76);S.hr=Math.min(S.hr+22,160);S.sbp=Math.max(S.sbp-25,55);break;
+    case 'laryngospasm': Object.assign(p,{compliance:50,resistance:90});
+      S.spo2=Math.max(S.spo2-20,70);S.hr=Math.min(S.hr+20,165);break;
+    case 'apnea':        Object.assign(p,{compliance:50,resistance:5});
+      S.rr=0;break;
+    case 'disconnect':   Object.assign(p,{compliance:50,resistance:5});break;
+    case 'pulm_edema':   Object.assign(p,{compliance:18,resistance:10});
+      S.spo2=Math.max(S.spo2-12,76);S.hr=Math.min(S.hr+14,155);S.rr=Math.min(S.rr+6,32);break;
+    case 'co2_absorber': Object.assign(p,{compliance:50,resistance:5});
+      S.etco2=Math.min(S.etco2+28,72);S.hr=Math.min(S.hr+10,145);break;
+  }
+  S=Object.assign({},S,p);
+  clamp();refreshNums();checkAlarms();sendState();
+}
+
+function applyIntervention(drug,dose){
+  var noCirc=(S.rhythm==='VFib'||S.rhythm==='Asystole'||S.rhythm==='PEA');
+  switch(drug){
+    // ── Vasopressors ──
+    case 'epi_push':
+      S.hr=Math.min(190,S.hr+Math.round(dose*1.2));    // 10mcg → +12 bpm
+      S.sbp=Math.min(240,S.sbp+Math.round(dose*3.0));  // 10mcg → +30 mmHg SBP
+      S.dbp=Math.min(150,S.dbp+Math.round(dose*1.5));  // 10mcg → +15 mmHg DBP
+      if(noCirc)S.etco2=Math.min(20,S.etco2+3);
+      break;
+    case 'epi_infusion':{
+      var e=dose*70;
+      S.hr=Math.min(190,S.hr+Math.round(e*.25));
+      S.sbp=Math.min(240,S.sbp+Math.round(e*.4));
+      S.dbp=Math.min(150,S.dbp+Math.round(e*.15));break;}
+    case 'norepi':{
+      var e=dose*70;
+      S.sbp=Math.min(240,S.sbp+Math.round(e*.5));
+      S.dbp=Math.min(150,S.dbp+Math.round(e*.3));
+      S.hr=Math.max(40,S.hr-Math.round(e*.05));break;}
+    case 'norepi_push':  // IV push mcg
+      S.sbp=Math.min(240,S.sbp+Math.round(dose*.20));
+      S.dbp=Math.min(150,S.dbp+Math.round(dose*.12));
+      S.hr=Math.max(45,S.hr-Math.round(dose*.03));break;
+    case 'phenylephrine':{  // infusion mcg/kg/min
+      var e=dose*70;
+      S.sbp=Math.min(240,S.sbp+Math.round(e*.35));
+      S.dbp=Math.min(150,S.dbp+Math.round(e*.2));
+      S.hr=Math.max(40,S.hr-Math.round(e*.08));break;}
+    case 'phenylephrine_push':  // IV push mcg — HR down, BP up
+      S.sbp=Math.min(240,S.sbp+Math.round(dose*.25));
+      S.dbp=Math.min(150,S.dbp+Math.round(dose*.15));
+      S.hr=Math.max(40,S.hr-Math.round(dose*.08));break;
+    case 'vasopressin':  // infusion
+      S.sbp=Math.min(240,S.sbp+Math.round(dose*80));
+      S.dbp=Math.min(150,S.dbp+Math.round(dose*50));break;
+    case 'vasopressin_push':  // push — double phenylephrine 100mcg effect, no HR change
+      S.sbp=Math.min(240,S.sbp+Math.round(dose*2.5));  // 20u = +50 mmHg SBP
+      S.dbp=Math.min(150,S.dbp+Math.round(dose*1.5));
+      // no HR change
+      break;
+    case 'dopamine':
+      if(dose>10){S.hr=Math.min(170,S.hr+Math.round(dose*2.5));S.sbp=Math.min(220,S.sbp+Math.round(dose*4));}
+      else if(dose>5){S.hr=Math.min(160,S.hr+Math.round(dose*1.5));S.sbp=Math.min(200,S.sbp+Math.round(dose*3));}
+      break;
+    case 'dobutamine':
+      S.hr=Math.min(160,S.hr+Math.round(dose*2));S.sbp=Math.min(180,S.sbp+Math.round(dose*2.5));
+      S.dbp=Math.max(40,S.dbp-Math.round(dose*.5));break;
+    case 'epi_anaphylaxis':
+      S.hr=Math.min(140,S.hr+Math.round(dose*60));S.sbp=Math.min(150,S.sbp+Math.round(dose*100));
+      S.dbp=Math.min(90,S.dbp+Math.round(dose*60));S.spo2=Math.min(98,S.spo2+Math.round(dose*20));break;
+    // ── Antiarrhythmics ──
+    case 'adenosine':
+      if(S.rhythm==='SVT'){
+        // 2-second asystole pause then convert to NSR
+        S.rhythm='Asystole';S.hr=0;
+        clamp();refreshNums();checkAlarms();sendState();
+        setTimeout(function(){
+          S.rhythm='NSR';S.hr=68;S.sbp=Math.min(130,S.sbp+15);S.dbp=Math.min(85,S.dbp+8);
+          clamp();refreshNums();checkAlarms();sendState();
+        },2000);
+        return;
+      } else {
+        S.hr=Math.max(30,S.hr-45);
+        clamp();refreshNums();checkAlarms();sendState();
+        setTimeout(function(){S.hr=Math.min(S.hr+40,180);clamp();refreshNums();checkAlarms();sendState();},8000);
+        return;
+      }
+    case 'amiodarone':
+      if(S.rhythm==='VTach'&&Math.random()>.35){S.rhythm='NSR';S.hr=78;S.sbp=Math.min(120,S.sbp+25);}
+      else if(S.rhythm==='AFib'&&Math.random()>.5){S.rhythm='NSR';S.hr=72;}
+      S.hr=Math.max(40,S.hr-Math.round(dose*.03));S.sbp=Math.max(60,S.sbp-Math.round(dose*.04));break;
+    case 'lidocaine':
+      if(S.rhythm==='VTach'&&Math.random()>.45){S.rhythm='NSR';S.hr=72;S.sbp=Math.min(110,S.sbp+20);}break;
+    case 'metoprolol':
+      S.hr=Math.max(40,S.hr-Math.round(dose*8));S.sbp=Math.max(70,S.sbp-Math.round(dose*5));break;
+    case 'diltiazem':
+      S.hr=Math.max(40,S.hr-Math.round(dose*.8));S.sbp=Math.max(70,S.sbp-Math.round(dose*.6));break;
+    case 'atropine':
+      S.hr=Math.min(150,S.hr+Math.round(dose*42));
+      S.sbp=Math.min(120,S.sbp+Math.round(dose*15)); // HR up → BP up
+      if(S.rhythm==='Brady')S.rhythm='NSR';break;
+    // ── Sedation/Airway ──
+    case 'ketamine':
+      S.hr=Math.min(140,S.hr+Math.round(dose*8));S.sbp=Math.min(200,S.sbp+Math.round(dose*10));
+      S.dbp=Math.min(130,S.dbp+Math.round(dose*5));break;
+    case 'propofol':
+      S.sbp=Math.max(60,S.sbp-Math.round(dose*.4));S.dbp=Math.max(40,S.dbp-Math.round(dose*.25));
+      S.hr=Math.max(50,S.hr-Math.round(dose*.1));S.rr=Math.max(0,S.rr-Math.round(dose*.05));break;
+    case 'succinylcholine':
+      S.rr=0;S.etco2=Math.max(0,S.etco2-5);break;
+    case 'intubation':
+      S.rr=12;S.etco2=Math.min(40,S.etco2+10);S.spo2=Math.min(100,S.spo2+5);
+      S.etco2On=true;break;
+    // ── Fluids/Blood ──
+    case 'fluid':
+      S.hr=Math.max(50,S.hr-Math.round(dose/500*12));S.sbp=Math.min(140,S.sbp+Math.round(dose/500*18));
+      S.dbp=Math.min(90,S.dbp+Math.round(dose/500*10));S.etco2=Math.min(40,S.etco2+Math.round(dose/500*4));break;
+    case 'blood':
+      S.hr=Math.max(50,S.hr-Math.round(dose*8));S.sbp=Math.min(140,S.sbp+Math.round(dose*12));
+      S.dbp=Math.min(90,S.dbp+Math.round(dose*7));S.spo2=Math.min(100,S.spo2+Math.round(dose*2));break;
+    case 'o2':
+      S.spo2=Math.min(100,S.spo2+Math.round(dose*.8));break;
+    // ── Antihypertensives ──
+    case 'nitroglycerin':
+      S.sbp=Math.max(60,S.sbp-Math.round(dose*.04));S.dbp=Math.max(40,S.dbp-Math.round(dose*.025));break;
+    case 'nicardipine':
+      S.sbp=Math.max(70,S.sbp-Math.round(dose*8));S.dbp=Math.max(45,S.dbp-Math.round(dose*5));break;
+    case 'labetalol':
+      S.sbp=Math.max(70,S.sbp-Math.round(dose*1.2));S.dbp=Math.max(45,S.dbp-Math.round(dose*.8));
+      S.hr=Math.max(45,S.hr-Math.round(dose*.5));break;
+    case 'narcan':
+      S.rr=Math.min(18,S.rr+Math.round(dose*8));S.spo2=Math.min(99,S.spo2+Math.round(dose*6));break;
+    // ── Electrical ──
+    case 'cardioversion':
+      if(['VTach','SVT','AFib'].includes(S.rhythm)){
+        S.rhythm='NSR';S.hr=68;S.sbp=110;S.dbp=70;
+        // Ensure rr and etco2 are visible after cardioversion
+        if(S.rr===0)S.rr=14;
+        if(S.etco2===0)S.etco2=30;
+      }
+      break;
+    case 'defib':
+      if(S.rhythm==='VFib'&&Math.random()>.25){
+        S.rhythm='NSR';S.hr=55;S.sbp=80;S.dbp=50;S.spo2=82;
+        S.etco2=30;S.rr=8;  // weak spontaneous respirations — waveform returns
+      } else if(S.rhythm==='VTach'&&S.sbp<30&&Math.random()>.3){
+        S.rhythm='NSR';S.hr=55;S.sbp=80;S.dbp=50;S.spo2=82;
+        S.etco2=30;S.rr=8;
+      }
+      break;
+    case 'pacing':
+      S.hr=dose;S.rhythm='Paced';S.sbp=Math.min(110,S.sbp+20);S.dbp=Math.min(70,S.dbp+10);break;
+  }
+  clamp();refreshNums();checkAlarms();sendState();
+  if(S.artLine)updateArtLines();
+}
+// Also call updateArtLines after resize so grid lines stay in sync
+var _origResizeAll=resizeAll;
+resizeAll=function(){_origResizeAll();if(S.artLine)updateArtLines();};
+
+</script>
+</body>
+</html>
