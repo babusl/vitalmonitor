@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MedSim Monitor v12</title>
+<title>MedSim Monitor v13</title>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://babusl.github.io/medsim-physiologyengine/medsim-physiologyengine.js"></script>
 <style>
@@ -54,7 +54,22 @@ canvas{display:block;position:absolute;top:0;left:0;width:100%;height:100%}
   <div style="font-size:44px">🖥️</div>
   <h1>MedSim Monitor</h1>
   <p>Choose a <strong style="color:#fff">Room Code</strong>.<br>Enter this same code on the phone controller to connect.</p>
-  <input id="setup-input" type="text" value="ROOM1" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">
+  <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+  <select id="pt-mode" onchange="document.getElementById('age-row').style.display=this.value==='peds'?'flex':'none'"
+    style="flex:1;background:#111;border:1px solid #333;border-radius:7px;color:#40c8ff;
+    font-size:13px;font-weight:700;padding:8px;outline:none">
+    <option value="adult">Adult Patient</option>
+    <option value="peds">Pediatric Patient</option>
+  </select>
+</div>
+<div id="age-row" style="display:none;gap:8px;margin-bottom:8px;align-items:center">
+  <span style="font-size:12px;color:#556;white-space:nowrap">Age (years):</span>
+  <input id="pt-age" type="number" min="0" max="17" step="0.5" value="3"
+    style="flex:1;background:#111;border:1px solid #333;border-radius:7px;
+    color:#40c8ff;font-size:16px;font-weight:700;padding:8px;outline:none;text-align:center">
+  <span style="font-size:10px;color:#445">blank = toddler (3yr)</span>
+</div>
+<input id="setup-input" type="text" value="ROOM1" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">
   <button id="setup-btn" onclick="startMonitor()">START MONITOR</button>
   <div id="setup-msg">Both devices need internet access.</div>
 </div>
@@ -159,13 +174,20 @@ function initPhysiologyEngine(){
   // Listen for engine state changes and apply to monitor S
   MedSimCore.on('state', function(engineState){
     ['hr','sbp','dbp','spo2','rr','etco2','temp'].forEach(function(k){
-      if(engineState[k] != null) S[k] = engineState[k];
+      if(engineState[k] != null) S[k] = Math.round(engineState[k]);
     });
-    if(engineState._vent){
-      Object.assign(S, engineState._vent);
-    }
     clamp(); refreshNums(); checkAlarms();
     if(S.artLine) updateArtLines();
+    sendState();
+  });
+  // Vent mechanics changes (compliance/resistance from bronchodilation etc)
+  MedSimCore.on('vent', function(engineState){
+    if(engineState.compliance != null) S.compliance = engineState.compliance;
+    if(engineState.resistance != null) S.resistance  = engineState.resistance;
+    // If resistance normalized → update ventPath display to normal
+    if(S.resistance <= 8 && S.ventPath === 'bronchospasm'){
+      S.ventPath = 'normal';
+    }
     sendState();
   });
   console.log('MedSim: physiology engine v'+MedSimCore.version+' loaded');
@@ -299,6 +321,23 @@ document.getElementById('setup-input').addEventListener('keydown',function(e){if
 
 function startMonitor(){
   initPhysiologyEngine();
+  // Apply patient mode from setup screen
+  var modeEl = document.getElementById('pt-mode');
+  var ageEl  = document.getElementById('pt-age');
+  if(modeEl && typeof MedSimCore !== 'undefined'){
+    var mode = modeEl.value;
+    if(mode === 'peds'){
+      var age = parseFloat(ageEl.value) || 3;
+      MedSimCore.setPatient({mode:'peds'});
+      MedSimCore.setPatientAge(age);
+      S._mode = 'peds';
+      S._weight = MedSimCore.P.weight;
+      Object.assign(S, MedSimCore.P.baseline);
+    } else {
+      MedSimCore.setPatient({mode:'adult', weight:70, age:35});
+      S._mode = 'adult'; S._weight = 70;
+    }
+  }
   var v=document.getElementById('setup-input').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
   if(!v){alert('Enter a room code');return;}
   ROOM=v;
@@ -370,7 +409,14 @@ function handleMessage(msg){
   if(msg.type==='update'){S=Object.assign({},S,msg.data);}
   else if(msg.type==='scenario'){applyScenario(msg.name);return;}
   else if(msg.type==='intervention'){applyIntervention(msg.drug,parseFloat(msg.dose));return;}
-  else if(msg.type==='ventPath'){applyVentPath(msg.path);return;}
+  else if(msg.type==='ventPath'){
+    applyVentPath(msg.path);
+    if(typeof MedSimCore !== 'undefined'){
+      if(msg.path==='bronchospasm') MedSimCore.applyBronchospasmPhysiology(1);
+      else if(msg.path==='normal') MedSimCore.trSet({etco2:MedSimCore.P.baseline.etco2||35},'path');
+    }
+    return;
+  }
   clamp();refreshNums();checkAlarms();sendState();
 }
 
