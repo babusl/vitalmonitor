@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MedSim Monitor v11</title>
-<!-- MedSim Monitor v11 | NMB ventMode-aware physiology -->
+<title>MedSim Monitor v12</title>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://babusl.github.io/medsim-physiologyengine/medsim-physiologyengine.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{background:#000;color:#fff;font-family:'Courier New',monospace;overflow:hidden;width:100%;height:100vh;display:flex;flex-direction:column}
@@ -105,7 +105,7 @@ canvas{display:block;position:absolute;top:0;left:0;width:100%;height:100%}
 </div>
 <script>
 'use strict';
-var S={hr:72,sbp:120,dbp:80,spo2:98,rr:14,etco2:35,temp:98.6,rhythm:'NSR',artLine:false,etco2On:true,
+var S={hr:72,sbp:120,dbp:80,spo2:98,rr:14,etco2:35,temp:98.6,_weight:70,_mode:'adult',rhythm:'NSR',artLine:false,etco2On:true,
   ventMode:'VCV',tv:450,rr_set:14,peep:5,ps:10,fio2:50,ie:2.0,pipLimit:40,apl:30,
   compliance:50,resistance:5,ventPath:'normal',flowRate:40,riseTime:25,triggerSens:-2};
 var VA={actualTV:450}; // actual delivered values from vent — relayed to controller via state
@@ -144,6 +144,32 @@ function trClear(){TR={};laryngoPhase=0;pathStage=0;currentPath='normal';}  // c
 var laryngoPhase=0;  // 0=inactive, 1=sat dropping, 2=cardiovascular collapse
 var pathStage=0, currentPath='normal';  // 0=baseline, 1=mild, 2=severe
 var BASELINE={hr:72,sbp:120,dbp:80,spo2:98,rr:14,etco2:35};
+
+// ── Sync MedSimCore with monitor state ────────────────────────────────────────
+// MedSimCore is the physiology engine. Monitor state S is authoritative for display.
+// We bridge them: drug commands go through MedSimCore, results come back to S.
+function initPhysiologyEngine(){
+  if(typeof MedSimCore === 'undefined'){ 
+    console.warn('MedSim: physiology engine not loaded, using legacy mode');
+    return;
+  }
+  // Copy current S into engine
+  Object.assign(MedSimCore.S, S);
+  MedSimCore.P.baseline = Object.assign({}, BASELINE);
+  // Listen for engine state changes and apply to monitor S
+  MedSimCore.on('state', function(engineState){
+    ['hr','sbp','dbp','spo2','rr','etco2','temp'].forEach(function(k){
+      if(engineState[k] != null) S[k] = engineState[k];
+    });
+    if(engineState._vent){
+      Object.assign(S, engineState._vent);
+    }
+    clamp(); refreshNums(); checkAlarms();
+    if(S.artLine) updateArtLines();
+    sendState();
+  });
+  console.log('MedSim: physiology engine v'+MedSimCore.version+' loaded');
+}
 // Two-stage table for each pathology: vent mechanics + hemodynamic targets
 var STAGES={
   bronchospasm:{
@@ -207,6 +233,18 @@ function nibpTake(){
 }
 
 function stepTransitions(dt){
+  // If physiology engine loaded, it handles transitions
+  if(typeof MedSimCore !== 'undefined'){
+    MedSimCore.step(dt);
+    // Pull results back into monitor S
+    var es = MedSimCore.S;
+    ['hr','sbp','dbp','spo2','rr','etco2','temp'].forEach(function(k){
+      if(es[k] != null) S[k] = es[k];
+    });
+    // Still run nibp tick
+    nibpTick(dt);
+    return;
+  }
   nibpTick(dt);
   var changed=false;
   Object.keys(TR).forEach(function(k){
@@ -260,6 +298,7 @@ setInterval(function(){document.getElementById('clock').textContent=new Date().t
 document.getElementById('setup-input').addEventListener('keydown',function(e){if(e.key==='Enter')startMonitor();});
 
 function startMonitor(){
+  initPhysiologyEngine();
   var v=document.getElementById('setup-input').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
   if(!v){alert('Enter a room code');return;}
   ROOM=v;
@@ -328,21 +367,7 @@ function handleMessage(msg){
     clamp();refreshNums();checkAlarms();sendState();
     return;
   }
-  if(msg.type==='update'){
-    var prevMode=S.ventMode;
-    S=Object.assign({},S,msg.data);
-    // Handle ventMode change while paralyzed
-    if(msg.data&&msg.data.ventMode&&S._paralyzed){
-      var newMode=S.ventMode;
-      if(newMode==='Manual'&&prevMode!=='Manual'){
-        // Switched TO manual while paralyzed — RR=0, EtCO2 disappears
-        S.rr=0; S.etco2=0;
-      } else if(newMode!=='Manual'&&prevMode==='Manual'){
-        // Switched FROM manual to vent while paralyzed — machine breathes
-        S.rr=S.rr_set||12; S.etco2=Math.max(S.etco2||0,28);
-      }
-    }
-  }
+  if(msg.type==='update'){S=Object.assign({},S,msg.data);}
   else if(msg.type==='scenario'){applyScenario(msg.name);return;}
   else if(msg.type==='intervention'){applyIntervention(msg.drug,parseFloat(msg.dose));return;}
   else if(msg.type==='ventPath'){applyVentPath(msg.path);return;}
@@ -786,318 +811,89 @@ function applyVentPath(path){
 
 function applyIntervention(drug,dose){
   var noCirc=(S.rhythm==='VFib'||S.rhythm==='Asystole'||S.rhythm==='PEA');
-  switch(drug){
-    // ── Vasopressors / Inotropes ─────────────────────────────────────────────
-    // All IV pushes use 'iv' mode (~12s to peak).
-    // All infusions: DELTA from current state, scaled by dose.
-    //   Titrating up (0.1→0.2) adds more delta on top of wherever vitals are.
-    //   This lets vitals accumulate with each dose increase naturally.
 
-    case 'epi_push':
-      // Beta1+2+alpha. 10mcg→HR+4,SBP+5. 50mcg→HR+18,SBP+22.
-      trSet({
-        hr: Math.min(190, S.hr  + Math.round(dose * 0.36)),
-        sbp:Math.min(240, S.sbp + Math.round(dose * 0.44)),
-        dbp:Math.min(150, S.dbp + Math.round(dose * 0.16))
-      },'iv');
-      if(noCirc) S.etco2 = Math.min(20, S.etco2 + 3);
-      break;
+  // ── NIBP recheck — handled locally ───────────────────────────────────────
+  if(drug==='nibp_recheck'){ nibpTake(); return; }
 
-    case 'epi_infusion':
-      // Delta per mcg/kg/min from current state.
-      // 0.05 → +HR 5, +SBP 14, +DBP 5
-      // 0.10 → +HR 10, +SBP 28, +DBP 10
-      // 0.20 → +HR 20, +SBP 55, +DBP 20
-      trSet({
-        hr: Math.min(190, S.hr  + Math.round(dose * 100)),
-        sbp:Math.min(240, S.sbp + Math.round(dose * 275)),
-        dbp:Math.min(150, S.dbp + Math.round(dose * 100))
-      },'infusion');
-      break;
+  // ── Route through physiology engine if available ──────────────────────────
+  if(typeof MedSimCore !== 'undefined'){
+    // Map legacy drug names to engine keys
+    var KEY_MAP = {
+      'epinephrine':        'epinephrine_code',
+      'epi_push':           'epinephrine_push',
+      'epi_infusion':       'epinephrine',
+      'epinephrine_push':   'epinephrine_push',
+      'epinephrine_code':   'epinephrine_code',
+      'epinephrine_infusion':'epinephrine',
+      'norepi_infusion':    'norepinephrine',
+      'norepinephrine':     'norepinephrine',
+      'phenylephrine':      'phenylephrine',
+      'vasopressin':        'vasopressin_bolus',
+      'vasopressin_infusion':'vasopressin',
+      'ephedrine':          'ephedrine',
+      'dopamine':           'dopamine',
+      'propofol':           'propofol',
+      'ketamine':           'ketamine',
+      'etomidate':          'etomidate',
+      'midazolam':          'midazolam',
+      'dexmedetomidine':    'dexmedetomidine_bolus',
+      'dexmedetomidine_infusion':'dexmedetomidine',
+      'fentanyl':           'fentanyl',
+      'morphine':           'morphine',
+      'remifentanil':       'remifentanil',
+      'narcan':             'naloxone',
+      'naloxone':           'naloxone',
+      'succinylcholine':    'succinylcholine',
+      'rocuronium':         'rocuronium',
+      'vecuronium':         'vecuronium',
+      'sugammadex':         'sugammadex',
+      'neostigmine':        'neostigmine',
+      'atropine':           'atropine',
+      'glycopyrrolate':     'glycopyrrolate',
+      'adenosine':          'adenosine',
+      'amiodarone':         'amiodarone_arrest',
+      'amiodarone_infusion':'amiodarone_infusion',
+      'lidocaine':          'lidocaine',
+      'magnesium':          'magnesium',
+      'calcium':            'calcium_chloride',
+      'bicarb':             'sodium_bicarb',
+      'diphenhydramine':    'diphenhydramine',
+      'methylpred':         'methylprednisolone',
+      'fluid_bolus':        'fluid_bolus',
+      'fluid':              'fluid_bolus',
+      'blood':              'blood',
+      'albuterol':          'albuterol',
+      'defibrillation':     'defibrillation',
+      'cardioversion':      'cardioversion',
+      'intubation':         'intubation'
+    };
+    var engineKey = KEY_MAP[drug] || drug;
+    // Sync engine state with current monitor state before giving drug
+    Object.assign(MedSimCore.S, {
+      hr:S.hr, sbp:S.sbp, dbp:S.dbp, spo2:S.spo2,
+      rr:S.rr, etco2:S.etco2, ventMode:S.ventMode,
+      rr_set:S.rr_set, _paralyzed:S._paralyzed,
+      compliance:S.compliance, resistance:S.resistance
+    });
+    MedSimCore.P.baseline = Object.assign({}, BASELINE);
+    MedSimCore.give(engineKey, dose, {weight: S._weight||70});
+    // Engine will emit 'state' event which updates S via the listener
+    return;
+  }
 
-    case 'norepi':
-      // Strong alpha, mild beta1. Small HR increase, mostly BP.
-      // 0.05 → +SBP 14, +DBP 9, +HR 2
-      // 0.10 → +SBP 28, +DBP 18, +HR 4
-      // 0.20 → +SBP 55, +DBP 35, +HR 7
-      trSet({
-        sbp:Math.min(240, S.sbp + Math.round(dose * 275)),
-        dbp:Math.min(150, S.dbp + Math.round(dose * 180)),
-        hr: Math.min(160, S.hr  + Math.round(dose * 35))
-      },'infusion');
-      break;
-
-    case 'norepi_push':
-      trSet({
-        sbp:Math.min(240, S.sbp + Math.round(dose * 0.22)),
-        dbp:Math.min(150, S.dbp + Math.round(dose * 0.14))
-      },'iv');
-      break;
-
-    case 'phenylephrine':
-      // Pure alpha. HR down proportional to dose (baroreceptor reflex).
-      // 0.2 → +SBP 8, +DBP 5, HR -4
-      // 0.5 → +SBP 20, +DBP 12, HR -10
-      // 1.0 → +SBP 40, +DBP 24, HR -20
-      trSet({
-        sbp:Math.min(240, S.sbp + Math.round(dose * 40)),
-        dbp:Math.min(150, S.dbp + Math.round(dose * 24)),
-        hr: Math.max(40,  S.hr  - Math.round(dose * 20))
-      },'infusion');
-      break;
-
-    case 'phenylephrine_push':
-      // 100mcg → SBP +25, HR -10. 200mcg → SBP +50, HR -20.
-      trSet({
-        sbp:Math.min(240, S.sbp + Math.round(dose * 0.25)),
-        dbp:Math.min(150, S.dbp + Math.round(dose * 0.14)),
-        hr: Math.max(40,  S.hr  - Math.round(dose * 0.10))
-      },'iv');
-      break;
-
-    case 'vasopressin':
-      // V1 agonist — BP up, HR strictly neutral.
-      // 0.02 → +SBP 15, +DBP 10
-      // 0.03 → +SBP 22, +DBP 15
-      // 0.04 → +SBP 30, +DBP 20
-      trSet({
-        sbp:Math.min(200, S.sbp + Math.round(dose * 750)),
-        dbp:Math.min(130, S.dbp + Math.round(dose * 500))
-      },'infusion');
-      break;
-
-    case 'vasopressin_push':
-      trSet({
-        sbp:Math.min(200, S.sbp + Math.round(dose * 2.5)),
-        dbp:Math.min(130, S.dbp + Math.round(dose * 1.5))
-      },'iv');
-      break;
-
-    case 'dopamine':
-      // ≤3 mcg/kg/min: no hemodynamic effect (dopaminergic only).
-      // >3: beta1 kicks in, then alpha at high dose.
-      // 5  → +HR 7,  +SBP 8
-      // 10 → +HR 17, +SBP 21
-      // 15 → +HR 28, +SBP 38
-      // 20 → +HR 38, +SBP 55
-      if(dose > 3){
-        trSet({
-          hr: Math.min(170, S.hr  + Math.round((dose-3) * 3.5)),
-          sbp:Math.min(220, S.sbp + Math.round((dose-3) * 4.2))
-        },'infusion');
-      }
-      break;
-
-    case 'dobutamine':
-      // Inotrope. HR up, SBP modest rise, DBP falls slightly (vasodilation).
-      // 5  → +HR 11, +SBP 9,  DBP -4
-      // 10 → +HR 22, +SBP 18, DBP -8
-      // 15 → +HR 33, +SBP 27, DBP -12
-      trSet({
-        hr: Math.min(160, S.hr  + Math.round(dose * 2.2)),
-        sbp:Math.min(180, S.sbp + Math.round(dose * 1.8)),
-        dbp:Math.max(40,  S.dbp - Math.round(dose * 0.8))
-      },'infusion');
-      break;
-
-    case 'epi_anaphylaxis':
-      // IM epi 0.3mg. Slower IM absorption — 'push' mode (~20s onset).
-      // 0.3mg → HR +20, SBP +35, DBP +20, SpO2 +8
-      trSet({
-        hr: Math.min(140, S.hr  + Math.round(dose * 68)),
-        sbp:Math.min(160, S.sbp + Math.round(dose * 115)),
-        dbp:Math.min(95,  S.dbp + Math.round(dose * 68)),
-        spo2:Math.min(98, S.spo2 + Math.round(dose * 25))
-      },'push');
-      break;
-
-    // ── Antiarrhythmics ───────────────────────────────────────────────────────
-    case 'adenosine':
-      if(S.rhythm==='SVT'){
-        S.rhythm='Asystole';S.hr=0;
-        clamp();refreshNums();checkAlarms();sendState();
-        setTimeout(function(){
-          S.rhythm='NSR';S.hr=68;S.sbp=Math.min(130,S.sbp+15);S.dbp=Math.min(85,S.dbp+8);
-          clamp();refreshNums();checkAlarms();sendState();
-        },2000);
-        return;
-      } else {
-        S.hr=Math.max(30,S.hr-45);
-        clamp();refreshNums();checkAlarms();sendState();
-        setTimeout(function(){S.hr=Math.min(S.hr+40,180);clamp();refreshNums();checkAlarms();sendState();},8000);
-        return;
-      }
-
-    case 'amiodarone':
-      if(S.rhythm==='VTach'&&Math.random()>.35){S.rhythm='NSR';S.hr=78;S.sbp=Math.min(120,S.sbp+25);}
-      else if(S.rhythm==='AFib'&&Math.random()>.5){S.rhythm='NSR';S.hr=72;}
-      trSet({hr:Math.max(40,S.hr-Math.round(dose*0.03)), sbp:Math.max(60,S.sbp-Math.round(dose*0.04))},'push');
-      break;
-
-    case 'lidocaine':
-      if(S.rhythm==='VTach'&&Math.random()>.45){S.rhythm='NSR';S.hr=72;S.sbp=Math.min(110,S.sbp+20);}
-      break;
-
-    case 'metoprolol':
-      trSet({
-        hr: Math.max(40, S.hr -Math.round(dose*8)),
-        sbp:Math.max(70, S.sbp-Math.round(dose*5))
-      },'push');
-      break;
-
-    case 'diltiazem':
-      trSet({
-        hr: Math.max(40, S.hr -Math.round(dose*0.8)),
-        sbp:Math.max(70, S.sbp-Math.round(dose*0.6))
-      },'push');
-      break;
-
-    case 'atropine':
-      trSet({
-        hr: Math.min(150, S.hr+Math.round(dose*42)),
-        sbp:Math.min(120, S.sbp+Math.round(dose*15))
-      },'push');
-      if(S.rhythm==='Brady')S.rhythm='NSR';
-      break;
-
-    // ── Sedation / Airway ─────────────────────────────────────────────────────
-    case 'ketamine':
-      trSet({
-        hr: Math.min(140, S.hr+Math.round(dose*8)),
-        sbp:Math.min(200, S.sbp+Math.round(dose*10)),
-        dbp:Math.min(130, S.dbp+Math.round(dose*5))
-      },'push');
-      break;
-
-    case 'propofol':
-      trSet({
-        sbp:Math.max(60, S.sbp-Math.round(dose*0.4)),
-        dbp:Math.max(40, S.dbp-Math.round(dose*0.25)),
-        hr: Math.max(50, S.hr -Math.round(dose*0.1))
-      },'push');
-      S.rr=Math.max(0,S.rr-Math.round(dose*0.05));
-      break;
-
-    case 'succinylcholine':
-    case 'rocuronium':
-    case 'vecuronium':
-      // NMB logic depends on ventilator mode
-      // Manual mode (BVM/mask): patient stops breathing, EtCO2 disappears
-      // Ventilated (VCV/PCV/SIMV/PSV): machine breathes for patient, rate/EtCO2 unchanged
-      if(S.ventMode==='Manual'){
-        S.rr=0;
-        S.etco2=0;
-        // Store the set rate so it can be restored when ventilator mode is engaged
-        S._nmbSavedRR = S.rr_set || 14;
-        S._paralyzed = true;
-      }
-      // If on mechanical ventilation — set rate unchanged, EtCO2 maintained by vent
-      // Just zero out any spontaneous contribution
-      if(S.ventMode!=='Manual'){
-        S._paralyzed = true;
-        // rr_set (machine rate) unchanged — vent continues
-        // S.rr stays at machine rate
-        // EtCO2 maintained — no change
-      }
-      break;
-
-    case 'sugammadex':
-    case 'neostigmine':
-      // Reversal — restore spontaneous breathing
-      S._paralyzed = false;
-      if(S.ventMode==='Manual'){
-        // Restore spontaneous rate
-        S.rr = S._nmbSavedRR || 12;
-        S.etco2 = S.etco2 || 35;
-      }
-      break;
-
-    case 'intubation':
-      S.rr=12;S.etco2=Math.min(40,S.etco2+10);S.spo2=Math.min(100,S.spo2+5);
-      S.etco2On=true;
-      // If patient was paralyzed on manual — now intubated, vent will breathe for them
-      if(S._paralyzed){ S.rr=S.rr_set||12; S.etco2=Math.max(S.etco2,28); }
-      break;
-
-    // ── Fluids / Blood ────────────────────────────────────────────────────────
-    case 'fluid':
-      trSet({
-        hr: Math.max(50, S.hr -Math.round(dose/500*12)),
-        sbp:Math.min(140, S.sbp+Math.round(dose/500*18)),
-        dbp:Math.min(90,  S.dbp+Math.round(dose/500*10)),
-        etco2:Math.min(40,S.etco2+Math.round(dose/500*4))
-      },'infusion');
-      break;
-
-    case 'blood':
-      trSet({
-        hr: Math.max(50, S.hr -Math.round(dose*8)),
-        sbp:Math.min(140, S.sbp+Math.round(dose*12)),
-        dbp:Math.min(90,  S.dbp+Math.round(dose*7)),
-        spo2:Math.min(100,S.spo2+Math.round(dose*2))
-      },'infusion');
-      break;
-
-    case 'o2':
-      trSet({spo2:Math.min(100,S.spo2+Math.round(dose*0.8))},'push');
-      break;
-
-    // ── Antihypertensives ─────────────────────────────────────────────────────
-    case 'nitroglycerin':
-      trSet({
-        sbp:Math.max(60, S.sbp-Math.round(dose*0.04)),
-        dbp:Math.max(40, S.dbp-Math.round(dose*0.025))
-      },'push');
-      break;
-
-    case 'nicardipine':
-      trSet({
-        sbp:Math.max(70, S.sbp-Math.round(dose*8)),
-        dbp:Math.max(45, S.dbp-Math.round(dose*5))
-      },'infusion');
-      break;
-
-    case 'labetalol':
-      trSet({
-        sbp:Math.max(70, S.sbp-Math.round(dose*1.2)),
-        dbp:Math.max(45, S.dbp-Math.round(dose*0.8)),
-        hr: Math.max(45, S.hr -Math.round(dose*0.5))
-      },'push');
-      break;
-
-    case 'narcan':
-      trSet({
-        rr:  Math.min(18, S.rr +Math.round(dose*8)),
-        spo2:Math.min(99, S.spo2+Math.round(dose*6))
-      },'push');
-      break;
-
-    // ── Electrical ────────────────────────────────────────────────────────────
-    case 'cardioversion':
-      if(['VTach','SVT','AFib'].includes(S.rhythm)){
-        S.rhythm='NSR';S.hr=68;S.sbp=110;S.dbp=70;
-        if(S.rr===0)S.rr=14;
-        if(S.etco2===0)S.etco2=30;
-      }
-      break;
-
-    case 'defib':
-      if(S.rhythm==='VFib'&&Math.random()>.25){
-        S.rhythm='NSR';S.hr=55;S.sbp=80;S.dbp=50;S.spo2=82;
-        S.etco2=30;S.rr=8;
-      } else if(S.rhythm==='VTach'&&S.sbp<30&&Math.random()>.3){
-        S.rhythm='NSR';S.hr=55;S.sbp=80;S.dbp=50;S.spo2=82;
-        S.etco2=30;S.rr=8;
-      }
-      break;
-
-    case 'pacing':
-      S.hr=dose;S.rhythm='Paced';S.sbp=Math.min(110,S.sbp+20);S.dbp=Math.min(70,S.dbp+10);break;
-
-    case 'nibp_recheck':
-      nibpTimer=0;  // reset auto-cycle clock too
-      nibpTake();
-      return;  // nibpTake already calls refreshNums+sendState
+  // ── LEGACY FALLBACK (if engine not loaded) ────────────────────────────────
+  // Keep original NMB logic as fallback
+  if(drug==='succinylcholine'||drug==='rocuronium'||drug==='vecuronium'){
+    S._paralyzed=true; S._nmbSavedRR=S.rr_set||14;
+    if(S.ventMode==='Manual'){trSet({rr:0,etco2:0},'iv');}
+    clamp();refreshNums();checkAlarms();sendState();
+    return;
+  }
+  if(drug==='sugammadex'||drug==='neostigmine'){
+    S._paralyzed=false;
+    if(S.ventMode==='Manual'){trSet({rr:S._nmbSavedRR||12},'iv');}
+    clamp();refreshNums();checkAlarms();sendState();
+    return;
   }
   clamp();refreshNums();checkAlarms();sendState();
   if(S.artLine)updateArtLines();
